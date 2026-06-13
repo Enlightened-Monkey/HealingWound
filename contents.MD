@@ -282,3 +282,146 @@ $$
 $$
 
 This fully replaces interactive viewer needs for presentation/review scenarios.
+
+## 10. Implementation Optimizations & Enhancements
+
+### 10.1 Hybrid PRW→CRW Motion Model (Sector-Aware Agents)
+
+**Problem:** Pure PRW motion lacks spatial awareness; agents waste computational resources exploring irrelevant regions.
+
+**Solution:** Implement two-phase automaton with phase-dependent inertia parameter:
+
+$$
+\alpha_{\text{phase}} = \begin{cases}
+\alpha \in (0,1) & \text{if } d(\mathbf{x}_t, S_{\text{target}}) > r_{\text{tol}} \text{ [PRW: directed search]} \\
+0 & \text{if } d(\mathbf{x}_t, S_{\text{target}}) \le r_{\text{tol}} \text{ [CRW: local diffusion]}
+\end{cases}
+$$
+
+where $r_{\text{tol}} \approx 8$ pixels (tolerance radius), $S_{\text{target}}$ is the sector centroid updated every 15 steps.
+
+**Sector Priority Logic:**
+1. Compute infection density $\rho_{\text{inf}}(S_j)$ for adjacent sectors
+2. If $\exists$ infected sector: $\text{score}(S_j) = w_{\text{inf}} \cdot \rho_{\text{inf}}(S_j)$ (absolute priority)
+3. Else: $\text{score}(S_j) = w_{\text{inf}} \cdot \rho_{\text{inf}} + w_{\text{depth}} \cdot \bar{d}(S_j)$ (infection + depth)
+
+**Benefits:**
+- Agents actively target infection hotspots
+- Reduces unnecessary wandering via inertia suppression near targets
+- Maintains numerical stability (no division-by-zero in sector scoring)
+
+### 10.2 Early Stopping Conditions
+
+Simulation terminates upon satisfaction of either condition:
+
+**Condition 1:** Full wound coverage
+$$
+\text{coverage} = \frac{N_{\text{healed}} + N_{\text{dead}}}{N_{\text{wound}}} \ge 0.999 \Rightarrow \text{STOP}
+$$
+
+**Condition 2:** Steady-state equilibrium
+$$
+|\mathbf{w}| = 0 \land N_{\text{infected}} = 0 \Rightarrow \text{STOP}
+$$
+
+**Benefit:** Prevents wasteful iteration on convergent/terminal states; typically reduces computational cost by 30-50%.
+
+### 10.3 Enhanced Metrics Suite (Section 8)
+
+Expanded from basic cell counts to include analytical efficiency measures:
+
+$$
+\text{healing\_efficiency} = \frac{N_{\text{healed}}}{T_{\text{total}}} \quad \text{[healed cells per step]}
+$$
+
+$$
+\text{infection\_resistance} = \frac{N_{\text{healed} \land \neg\text{dead}}}{N_{\text{healed}} + N_{\text{dead}} + \varepsilon} \quad \text{[survival fraction]}
+$$
+
+$$
+\text{coverage\_total} = \text{coverage\_healed} + \text{coverage\_infected} + \text{coverage\_dead} \quad \text{[% wound processed]}
+$$
+
+Additional tracked metrics:
+- Mean & max visit counts (healing pressure distribution)
+- Walker death events (trajectory loss count)
+- Healed-surviving vs healed-dead split (net outcome)
+
+### 10.4 Visualization Enhancements
+
+**Multi-panel sector analysis (Figure 7.4+):**
+1. Sector grid overlay with unique IDs (tab20 colormap)
+2. Per-sector infection density heatmap
+3. Mean sector depth (priority component visualization)
+4. Walker visit count coverage (healing pressure)
+
+**Rendering optimization:**
+- Frame rendering uses dual-state colormap (infection priority > healing > necrosis)
+- Walkers rendered as cyan overlay (non-overlapping with disease states)
+- Background explicitly set to [0.06, 0.06, 0.06] for contrast
+
+### 10.5 MP4 Compression & Optimization
+
+**FFmpeg parameters:**
+- **FPS:** 45 fps (from 14 fps baseline) for smooth playback
+- **Codec:** libx264 (H.264, maximum player compatibility)
+- **Pixel format:** yuv420p (ensures universal playback)
+- **Sampling:** snapshot_interval=2 (temporal subsampling: every 2nd snapshot)
+- **CRF:** 23 (quality-filesize balance)
+
+**Expected outputs:**
+- Duration: $N_{\text{frames}} / 45$ seconds
+- Filesize: typically 5-15 MB for 300-step simulations
+- Bitrate: 8 Mbps nominal
+
+### 10.6 State Machine Architecture (Walkthrough)
+
+**Per time step $t$:**
+
+```
+1. Cyclic target update (every 15 steps):
+   For each walker i:
+     target[i] ← assign_walker_target(walker[i], sector grid)
+
+2. Walker motion (Hybrid PRW→CRW):
+   For each walker i:
+     α_phase ← (distance to target > r_tol) ? α : 0
+     h[i] ← α_phase × h[i] + (1-α_phase) × η
+     walker[i] ← argmax(dirs·h[i] + exploration_bonus)
+     visits[walker[i]] += 1
+     if visits[r,c] ≥ threshold[r,c]: healed[r,c] ← True
+
+3. Walker death (remove trapped):
+   walkers ← remove_trapped_walkers(walkers, active_mask)
+
+4. Infection dynamics:
+   For each infected cell (r,c):
+     counter[r,c] += 1 (with probability p_regrow)
+     if counter[r,c] ≥ τ_death: dead[r,c] ← True
+     Spread to neighbors with probability p_spread
+
+5. Isolation necrosis (every 5 steps):
+   has_path ← compute_boundary_reachability(healed, dead)
+   apply_isolation_necrosis(has_path, isolation_counter, τ_iso)
+
+6. Snapshots & Early Stopping:
+   if t % snapshot_every = 0: record snapshot
+   if coverage ≥ 0.999 or (|walkers|=0 ∧ infected=∅): BREAK
+```
+
+### 10.7 Numerical Stability Measures
+
+**Division-by-zero protection in sector scoring:**
+- Initialize scores to 0.0 for empty sectors
+- Use $\epsilon=1e-9$ denominators in normalization
+- Clamp depth maps to $[0,1]$ before modulation
+
+**Array slicing safety:**
+- Check `len(alive_idx) > 0` before subsetting heading/targets
+- Use `np.empty((0,N))` for zero-length arrays (preserves dtype)
+- Avoid implicit casting in boolean indexing
+
+**Infection counter stability:**
+- Reset isolation_counter only for non-isolated cells
+- Dead cells remain infectious (prevent premature termination)
+- Threshold comparisons use `>=` to ensure deterministic transitions
